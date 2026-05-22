@@ -62,20 +62,51 @@ async def call_tool_async(tool_name: str, arguments: dict):
 def call_tool(tool_name: str, arguments: dict):
     try:
         return asyncio.run(call_tool_async(tool_name, arguments))
-    except BaseExceptionGroup as eg:
-        errors = [str(e) for e in eg.exceptions]
-        raise Exception("\n".join(errors))
+    except Exception as e:
+        sub = getattr(e, "exceptions", None)
+        if sub:
+            raise Exception("\n".join(str(x) for x in sub))
+        raise
+
+
+async def list_tools_async():
+    async with streamablehttp_client(
+        endpoint.strip(),
+        headers=headers(),
+    ) as (read, write, _):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            return await session.list_tools()
+
+
+def list_tools():
+    try:
+        return asyncio.run(list_tools_async())
+    except Exception as e:
+        sub = getattr(e, "exceptions", None)
+        if sub:
+            raise Exception("\n".join(str(x) for x in sub))
+        raise
 
 
 def extract_json(result):
     if hasattr(result, "content"):
+        texts = []
+        parsed = []
         for item in result.content:
             text = getattr(item, "text", None)
-            if text:
-                try:
-                    return json.loads(text)
-                except Exception:
-                    return {"raw_text": text}
+            if not text:
+                continue
+            texts.append(text)
+            try:
+                parsed.append(json.loads(text))
+            except Exception:
+                parsed.append(None)
+
+        if texts:
+            if all(p is not None for p in parsed):
+                return parsed[0] if len(parsed) == 1 else parsed
+            return {"raw_text": "\n\n".join(texts)}
 
     try:
         return json.loads(str(result))
@@ -101,6 +132,31 @@ def display_tool_result(result):
 
 def normalize_rows(data):
     if isinstance(data, dict):
+        rows = data.get("rows")
+        if (
+            isinstance(rows, list)
+            and rows
+            and isinstance(rows[0], dict)
+            and "value" in rows[0]
+            and "data" in rows[0]
+        ):
+            columns = data.get("columns") or {}
+            dim = columns.get("dimension")
+            dim_label = (dim or {}).get("id") if isinstance(dim, dict) else None
+            dim_label = dim_label or "dimension"
+
+            sample = rows[0].get("data") or []
+            col_ids = columns.get("columnIds") or [f"metric_{i}" for i in range(len(sample))]
+
+            flat = []
+            for r in rows:
+                row_dict = {dim_label: r.get("value")}
+                values = r.get("data") or []
+                for i, col in enumerate(col_ids):
+                    row_dict[col] = values[i] if i < len(values) else None
+                flat.append(row_dict)
+            return pd.DataFrame(flat)
+
         for key in ["rows", "data", "results", "report"]:
             if key in data and isinstance(data[key], list):
                 return pd.DataFrame(data[key])
@@ -147,8 +203,9 @@ def render_report_output(data, csv_name):
         st.pyplot(fig)
 
 
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab_inspect, tab2, tab3, tab4 = st.tabs([
     "Test Connection",
+    "Inspect Metadata",
     "Run Report",
     "Raw Tool Call",
     "AI Query Simulator"
@@ -165,6 +222,50 @@ with tab1:
             display_tool_result(result)
         except Exception as e:
             st.error(str(e))
+
+    st.divider()
+    st.markdown("#### Server Tool Catalog")
+    st.caption(
+        "Calls MCP's standard tools/list. Shows every tool the server advertises "
+        "and its exact input schema — useful when payloads fail with cryptic errors."
+    )
+
+    if st.button("List Tools / Schemas"):
+        try:
+            result = list_tools()
+            st.session_state["tools_list"] = [
+                {
+                    "name": tool.name,
+                    "description": getattr(tool, "description", None),
+                    "inputSchema": getattr(tool, "inputSchema", None),
+                }
+                for tool in result.tools
+            ]
+        except Exception as e:
+            st.error(str(e))
+
+    if "tools_list" in st.session_state:
+        tools_data = st.session_state["tools_list"]
+        st.success(f"Server advertises {len(tools_data)} tools")
+
+        filter_text = st.text_input(
+            "Filter by tool name (substring)",
+            value="",
+            key="tools_filter"
+        )
+
+        if filter_text.strip():
+            needle = filter_text.strip().lower()
+            filtered = [t for t in tools_data if needle in (t["name"] or "").lower()]
+            st.caption(f"Showing {len(filtered)} of {len(tools_data)}")
+        else:
+            filtered = tools_data
+
+        for tool in filtered:
+            with st.expander(tool["name"]):
+                if tool.get("description"):
+                    st.markdown(tool["description"])
+                st.json(tool.get("inputSchema") or {})
 
     st.divider()
 
@@ -193,12 +294,34 @@ with tab1:
 
     st.divider()
 
+    st.markdown("#### Discovery")
+
+    discovery_dv = st.text_input(
+        "Data View ID for discovery (optional)",
+        value=os.getenv("ADOBE_DEFAULT_DATA_VIEW_ID", ""),
+        key="discovery_dv",
+        help="Scopes findDimensions / findMetrics to one data view. Leave blank to use session default."
+    )
+    discovery_search = st.text_input(
+        "Search query (optional)",
+        value="",
+        key="discovery_search",
+        placeholder="e.g. page, campaign, visits"
+    )
+    discovery_limit = st.number_input(
+        "Limit",
+        min_value=1,
+        max_value=500,
+        value=100,
+        key="discovery_limit"
+    )
+
     col1, col2, col3 = st.columns(3)
 
     with col1:
         if st.button("Find Data Views"):
             try:
-                result = call_tool("findDataViews", {})
+                result = call_tool("findDataViews", {"page": 0, "limit": int(discovery_limit)})
                 display_tool_result(result)
             except Exception as e:
                 st.error(str(e))
@@ -206,7 +329,12 @@ with tab1:
     with col2:
         if st.button("Find Dimensions"):
             try:
-                result = call_tool("findDimensions", {})
+                fd_payload = {"limit": int(discovery_limit)}
+                if discovery_dv.strip():
+                    fd_payload["dataViewId"] = discovery_dv.strip()
+                if discovery_search.strip():
+                    fd_payload["searchQuery"] = discovery_search.strip()
+                result = call_tool("findDimensions", fd_payload)
                 display_tool_result(result)
             except Exception as e:
                 st.error(str(e))
@@ -214,10 +342,175 @@ with tab1:
     with col3:
         if st.button("Find Metrics"):
             try:
-                result = call_tool("findMetrics", {})
+                fm_payload = {"limit": int(discovery_limit)}
+                if discovery_dv.strip():
+                    fm_payload["dataViewId"] = discovery_dv.strip()
+                if discovery_search.strip():
+                    fm_payload["searchQuery"] = discovery_search.strip()
+                result = call_tool("findMetrics", fm_payload)
                 display_tool_result(result)
             except Exception as e:
                 st.error(str(e))
+
+
+with tab_inspect:
+    st.subheader("Inspect CJA Metadata")
+    st.caption(
+        "Discovery tools for inspecting dimensions, metrics, and dimension item values. "
+        "Data View ID is optional if a session default has been set on the Test Connection tab."
+    )
+
+    inspect_data_view_id = st.text_input(
+        "Data View ID (shared)",
+        value=os.getenv("ADOBE_DEFAULT_DATA_VIEW_ID", ""),
+        key="inspect_dv"
+    )
+
+    st.divider()
+    st.markdown("### Search Dimension Items")
+    st.caption("Adobe requires startDate, endDate, page, and limit on this call.")
+
+    sdi_dim = st.text_input(
+        "Dimension ID",
+        value=os.getenv("ADOBE_DEFAULT_DIMENSION_ID", ""),
+        key="sdi_dim"
+    )
+    sdi_start = st.text_input(
+        "Start Date",
+        value=os.getenv("ADOBE_DEFAULT_START_DATE", "2026-05-01T00:00:00.000"),
+        key="sdi_start"
+    )
+    sdi_end = st.text_input(
+        "End Date",
+        value=os.getenv("ADOBE_DEFAULT_END_DATE", "2026-05-21T23:59:59.999"),
+        key="sdi_end"
+    )
+    sdi_search_and = st.text_input(
+        "Search (AND, optional)",
+        value="",
+        key="sdi_search_and",
+        placeholder="e.g. checkout"
+    )
+    sdi_search_or = st.text_input(
+        "Search (OR, optional)",
+        value="",
+        key="sdi_search_or",
+        placeholder="e.g. cart|wishlist"
+    )
+    sdi_page = st.number_input(
+        "Page",
+        min_value=0,
+        value=0,
+        key="sdi_page"
+    )
+    sdi_limit = st.number_input(
+        "Limit",
+        min_value=1,
+        max_value=500,
+        value=int(os.getenv("ADOBE_DEFAULT_LIMIT", "10")),
+        key="sdi_limit"
+    )
+
+    if st.button("Search Items"):
+        try:
+            if not sdi_dim.strip():
+                st.error("Dimension ID is required.")
+                st.stop()
+            if not sdi_start.strip() or not sdi_end.strip():
+                st.error("Start Date and End Date are required.")
+                st.stop()
+
+            sdi_payload = {
+                "dimensionId": sdi_dim.strip(),
+                "startDate": sdi_start.strip(),
+                "endDate": sdi_end.strip(),
+                "page": int(sdi_page),
+                "limit": int(sdi_limit),
+            }
+            if inspect_data_view_id.strip():
+                sdi_payload["dataViewId"] = inspect_data_view_id.strip()
+            if sdi_search_and.strip():
+                sdi_payload["searchAnd"] = sdi_search_and.strip()
+            if sdi_search_or.strip():
+                sdi_payload["searchOr"] = sdi_search_or.strip()
+
+            st.caption("Payload sent to searchDimensionItems")
+            st.code(json.dumps(sdi_payload, indent=2), language="json")
+
+            result = call_tool("searchDimensionItems", sdi_payload)
+            display_tool_result(result)
+        except Exception as e:
+            st.error(str(e))
+
+    st.divider()
+    st.markdown("### Describe Dimension")
+    st.caption(
+        "Adobe's describeDimension expects the dimension ID without the `variables/` prefix. "
+        "Paste either form — the app will strip it automatically."
+    )
+
+    dd_dim = st.text_input(
+        "Dimension ID to describe",
+        value=os.getenv("ADOBE_DEFAULT_DIMENSION_ID", ""),
+        key="dd_dim"
+    )
+
+    if st.button("Describe Dimension"):
+        try:
+            if not dd_dim.strip():
+                st.error("Dimension ID is required.")
+                st.stop()
+
+            dim_clean = dd_dim.strip()
+            if dim_clean.startswith("variables/"):
+                dim_clean = dim_clean[len("variables/"):]
+
+            dd_payload = {"dimensionId": dim_clean}
+            if inspect_data_view_id.strip():
+                dd_payload["dataViewId"] = inspect_data_view_id.strip()
+
+            st.caption("Payload sent to describeDimension")
+            st.code(json.dumps(dd_payload, indent=2), language="json")
+
+            result = call_tool("describeDimension", dd_payload)
+            display_tool_result(result)
+        except Exception as e:
+            st.error(str(e))
+
+    st.divider()
+    st.markdown("### Describe Metric")
+    st.caption(
+        "Adobe's describeMetric expects the metric ID without the `metrics/` prefix. "
+        "Paste either form — the app will strip it automatically."
+    )
+
+    dm_metric = st.text_input(
+        "Metric ID to describe",
+        value=os.getenv("ADOBE_DEFAULT_METRIC_ID", ""),
+        key="dm_metric"
+    )
+
+    if st.button("Describe Metric"):
+        try:
+            if not dm_metric.strip():
+                st.error("Metric ID is required.")
+                st.stop()
+
+            metric_clean = dm_metric.strip()
+            if metric_clean.startswith("metrics/"):
+                metric_clean = metric_clean[len("metrics/"):]
+
+            dm_payload = {"metricId": metric_clean}
+            if inspect_data_view_id.strip():
+                dm_payload["dataViewId"] = inspect_data_view_id.strip()
+
+            st.caption("Payload sent to describeMetric")
+            st.code(json.dumps(dm_payload, indent=2), language="json")
+
+            result = call_tool("describeMetric", dm_payload)
+            display_tool_result(result)
+        except Exception as e:
+            st.error(str(e))
 
 
 with tab2:
@@ -302,11 +595,13 @@ with tab2:
                 st.stop()
 
             result = call_tool("runReport", payload)
-            data = extract_json(result)
-            render_report_output(data, "cja_report.csv")
+            st.session_state["report_data"] = extract_json(result)
 
         except Exception as e:
             st.error(str(e))
+
+    if "report_data" in st.session_state:
+        render_report_output(st.session_state["report_data"], "cja_report.csv")
 
 
 with tab3:
@@ -417,8 +712,10 @@ with tab4:
                 st.stop()
 
             result = call_tool("runReport", simulated_payload)
-            data = extract_json(result)
-            render_report_output(data, "cja_simulated_query.csv")
+            st.session_state["sim_report_data"] = extract_json(result)
 
         except Exception as e:
             st.error(str(e))
+
+    if "sim_report_data" in st.session_state:
+        render_report_output(st.session_state["sim_report_data"], "cja_simulated_query.csv")
