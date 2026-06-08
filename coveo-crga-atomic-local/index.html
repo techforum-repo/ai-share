@@ -5,84 +5,98 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Coveo Atomic Local</title>
 
-    <!-- Atomic theme CSS -->
+    <!-- Atomic theme CSS + components, loaded straight from Coveo's CDN -->
     <link
       rel="stylesheet"
       href="https://static.cloud.coveo.com/atomic/v3/themes/coveo.css"
     />
+    <script
+      type="module"
+      src="https://static.cloud.coveo.com/atomic/v3/atomic.esm.js"
+    ></script>
+
+    <!-- ⚙️ Demo config — edit these three values (public search token is fine here) -->
+    <script>
+      const CONFIG = {
+        token: "",          // Coveo public search token
+        orgId: "",          // Coveo organization id
+        answerConfigId: "", // CRGA answer configuration id
+        searchHub: "",                             // Coveo search hub
+        pipeline: "",                              // Coveo query pipeline
+      };
+    </script>
 
     <style>
+      :root {
+        /* Tweak these two to taste */
+        --page-max-width: 1100px;   /* how wide the content can get */
+        --page-padding-x: 32px;     /* space on the left & right */
+      }
+
       html,
       body {
-        margin: 0 !important;
-        padding: 0 !important;
-        width: 100% !important;
+        margin: 0;
+        padding: 0;
+        background: #f5f6f8;
+        color: #1d1f24;
+        font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
       }
 
-      /* ✅ Make the entire Atomic interface edge-to-edge */
+      /* Centered, padded container instead of edge-to-edge */
       atomic-search-interface {
         display: block;
-        width: 100vw !important;
-        max-width: none !important;
-
-        /* Remove theme max width constraints */
-        --atomic-layout-max-width: 100%;
-        --atomic-search-layout-max-width: 100%;
-        --atomic-interface-max-width: 100%;
-
-        /* Optional: reduce side padding so it truly feels edge-to-edge */
-        --atomic-layout-spacing: 0px;
-        --atomic-layout-padding: 0px;
+        box-sizing: border-box;
+        max-width: var(--page-max-width);
+        margin: 0 auto;
+        padding: 32px var(--page-padding-x) 64px;
       }
 
-      /* ✅ Remove the centered "container" (if your build exposes these parts) */
-      atomic-search-interface::part(container),
-      atomic-search-interface::part(wrapper),
-      atomic-search-layout::part(container) {
-        width: 100% !important;
-        max-width: none !important;
-        margin: 0 !important;
-        padding-left: 0 !important;
-        padding-right: 0 !important;
+      /* Optional page heading above the search box */
+      .page-header {
+        max-width: var(--page-max-width);
+        margin: 0 auto;
+        padding: 28px var(--page-padding-x) 0;
+        font-size: 22px;
+        font-weight: 600;
       }
 
-      /* Ensure the layout sections can expand */
-      atomic-layout-section {
-        width: 100% !important;
-        max-width: none !important;
+      /* Give the search box and the generated answer a clean card look */
+      atomic-search-box {
+        display: block;
+        margin-bottom: 8px;
       }
 
-      /* Make key components fill the available width */
-      atomic-search-box,
-      atomic-generated-answer,
-      atomic-result-list,
-      atomic-pager {
-        width: 100% !important;
-        max-width: none !important;
-      }
-
-      /* Generated answer internal card */
       atomic-generated-answer::part(container) {
-        width: 100% !important;
-        max-width: none !important;
-        margin: 0 !important;
+        background: #ffffff;
+        border: 1px solid #e3e5e9;
+        border-radius: 12px;
+        padding: 20px 24px;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
       }
 
-      /* Optional: if you still see left/right spacing, force the layout grid to span */
-      atomic-search-layout atomic-layout-section[section="search"],
-      atomic-search-layout atomic-layout-section[section="main"] {
-        grid-column: 1 / -1;
+      /* Breathing room between major blocks */
+      atomic-layout-section[section="main"] {
+        margin-top: 8px;
+      }
+
+      atomic-pager {
+        display: block;
+        margin-top: 24px;
+      }
+
+      /* On narrow screens, tighten the side padding */
+      @media (max-width: 640px) {
+        :root {
+          --page-padding-x: 16px;
+        }
       }
     </style>
   </head>
 
   <body>
-    <atomic-search-interface
-      id="coveo"
-      language="en"
-      pipeline="Corporate"
-      search-hub="Corporate"
-    >
+    <div class="page-header">Coveo Search Demo</div>
+
+    <atomic-search-interface id="coveo" language="en">
       <atomic-query-suggestions></atomic-query-suggestions>
 
       <atomic-search-layout>
@@ -93,7 +107,7 @@
           ></atomic-search-box>
 
           <div style="margin-top: 12px; width: 100%;">
-            <atomic-generated-answer answer-configuration-id=""></atomic-generated-answer>
+            <atomic-generated-answer></atomic-generated-answer>
           </div>
 
           <atomic-did-you-mean></atomic-did-you-mean>
@@ -120,6 +134,23 @@
       </atomic-search-layout>
     </atomic-search-interface>
 
-    <script type="module" src="/main.js"></script>
+    <!-- Init: wire CONFIG into the Atomic interface and run the first search -->
+    <script type="module">
+      await customElements.whenDefined("atomic-search-interface");
+      const el = document.querySelector("atomic-search-interface");
+
+      // Apply CONFIG values onto the interface before initializing
+      el.setAttribute("search-hub", CONFIG.searchHub);
+      el.setAttribute("pipeline", CONFIG.pipeline);
+      el.querySelector("atomic-generated-answer")
+        .setAttribute("answer-configuration-id", CONFIG.answerConfigId);
+
+      await el.initialize({
+        accessToken: CONFIG.token,
+        organizationId: CONFIG.orgId,
+      });
+
+      el.executeFirstSearch();
+    </script>
   </body>
 </html>
