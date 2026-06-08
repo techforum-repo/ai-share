@@ -1,0 +1,22 @@
+{
+  "name": "coveo-atomic-local",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --port 5173",
+    "build": "vite build",
+    "preview": "vite preview --port 5173"
+  },
+  "dependencies": {
+    "@coveo/atomic": "^3.0.0",
+    "@coveo/headless": "^3.0.0",
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "i18next": "^25.8.18"
+  },
+  "devDependencies": {
+    "vite": "^4.5.3"
+  }
+}
