@@ -64,12 +64,13 @@ INTAKE_QUESTIONS = [
     },
 ]
 
-# Request 2: depends on request 1, so it is a separate call. Text only.
+# Request 2: depends on request 1, so it is a separate call. Text only: the
+# metadata (for the intended usage) and the rights note.
 RELEASE_QUESTION = {
     "type": "predicate",
     "name": "release_confirmed",
-    "instructions": "Does this rights note confirm a signed model release that covers every "
-                    "identifiable person and the intended usage stated in the note?",
+    "instructions": "Does the rights note confirm a signed model release that covers every "
+                    "identifiable person and the intended usage given in the asset metadata?",
 }
 
 # Starting thresholds. Tune them on labelled assets from your own library.
@@ -101,8 +102,9 @@ def intake_request(image_path, metadata):
     }
 
 
-def release_request(rights_note):
-    return {"model": MODEL, "input": rights_note, "questions": [RELEASE_QUESTION]}
+def release_request(metadata, rights_note):
+    text = f"Asset metadata:\n{metadata}\nRights note:\n{rights_note}"
+    return {"model": MODEL, "input": text, "questions": [RELEASE_QUESTION]}
 
 
 def ask(client, request):
@@ -115,7 +117,7 @@ def triage(ask_fn, image_path, metadata, rights_note):
     """Request 1, request 2 only when people are found, then the policy."""
     answers = ask_fn(intake_request(image_path, metadata))
     if answers.get("identifiable_people", {}).get("probability", 0) >= PEOPLE_MIN:
-        answers.update(ask_fn(release_request(rights_note)))
+        answers.update(ask_fn(release_request(metadata, rights_note)))
     return route(answers), answers
 
 

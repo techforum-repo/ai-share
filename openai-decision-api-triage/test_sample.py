@@ -1,12 +1,12 @@
 """Test the asset-intake sample against the live Decisions API.
 
-Sends four cases to POST /v1/decisions, validates every answer against the
+Sends the sample and control cases to POST /v1/decisions, validates every answer against the
 documented response shape, checks what the model decided, runs the sample end to
 end through triage(), and saves everything to results/ (git-ignored).
 
   export OPENAI_API_KEY=sk-...
   python test_sample.py
-  python test_sample.py --image ~/photos/hiker.jpg --runs 3
+  python test_sample.py --image ~/photos/hiker.jpg --alt "Hiker on a ridge at dusk" --runs 3
 
 Uses only the standard library, so it does not need an SDK with Decisions support.
 Exit code is 1 if a response breaks the documented shape. When the model simply
@@ -30,9 +30,12 @@ RESULTS = HERE / "results"
 sys.path.insert(0, str(HERE))
 import asset_triage as t  # noqa: E402
 
-API_URL = "https://api.openai.com/v1/decisions"
-CORRECT_ALT = ("Alt text: A smiling hiker in a blue waterproof jacket on a mountain "
-               "trail at sunset.")
+# OPENAI_BASE_URL works as it does for the OpenAI SDK (proxies, gateways, test servers).
+API_URL = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/") + "/decisions"
+SAMPLE_IMAGE = FIX / "sample-asset.png"
+# Correct alt text for the sample image, which is an illustration, not a photo.
+SAMPLE_ALT = ("An illustration of a smiling hiker in a blue waterproof jacket on a mountain "
+              "trail at sunset.")
 
 results = []
 
@@ -93,17 +96,26 @@ def call(req, key):
     return answers, raw, ms
 
 
-def live(key, image, runs):
+def live(key, image, runs, alt):
     meta = (FIX / "metadata.txt").read_text()
-    correct_meta = "\n".join(CORRECT_ALT if l.startswith("Alt text:") else l for l in meta.splitlines())
-    cases = [
-        ("sample: wrong alt text", t.intake_request(image, meta),
-         {"alt_text_matches": ("<", 0.5), "asset_type": ("==", "lifestyle")}),
-        ("control: correct alt text", t.intake_request(image, correct_meta),
-         {"alt_text_matches": (">=", t.ALT_TEXT_MIN)}),
-        ("release note: signed release", t.release_request((FIX / "rights.txt").read_text()),
+    is_sample = image.resolve() == SAMPLE_IMAGE.resolve()
+    # The metadata's alt text describes a studio packshot, so it should not match.
+    expect_wrong = {"alt_text_matches": ("<", 0.5)}
+    if is_sample:
+        expect_wrong["asset_type"] = ("==", "graphic")   # the sample is an illustration
+    cases = [("sample: wrong alt text", t.intake_request(image, meta), expect_wrong)]
+    alt = alt or (SAMPLE_ALT if is_sample else None)
+    if alt:
+        correct_meta = "\n".join(f"Alt text: {alt}" if l.startswith("Alt text:") else l
+                                  for l in meta.splitlines())
+        cases.append(("control: correct alt text", t.intake_request(image, correct_meta),
+                      {"alt_text_matches": (">=", t.ALT_TEXT_MIN)}))
+    else:
+        print("No control case: pass --alt with the correct alt text for your image to add one.")
+    cases += [
+        ("release note: signed release", t.release_request(meta, (FIX / "rights.txt").read_text()),
          {"release_confirmed": (">=", t.RELEASE_MIN)}),
-        ("release note: no release", t.release_request((FIX / "rights-missing.txt").read_text()),
+        ("release note: no release", t.release_request(meta, (FIX / "rights-missing.txt").read_text()),
          {"release_confirmed": ("<", t.RELEASE_MIN)}),
     ]
     record = {"run_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -147,7 +159,8 @@ def live(key, image, runs):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--image", type=Path, default=FIX / "sample-asset.png", help="image to test with")
+    p.add_argument("--image", type=Path, default=SAMPLE_IMAGE, help="image to test with")
+    p.add_argument("--alt", help="correct alt text for --image, to add a control case")
     p.add_argument("--runs", type=int, default=1, help="calls per case, for latency and stability")
     args = p.parse_args()
 
@@ -158,7 +171,7 @@ def main():
     if image.suffix.lower() not in t.MIME:
         sys.exit(f"unsupported image type {image.suffix}; use one of {', '.join(t.MIME)}")
 
-    out, answers_out = live(key, image, args.runs)
+    out, answers_out = live(key, image, args.runs, args.alt)
 
     counts = {s: sum(r["status"] == s for r in results) for s in ("PASS", "WARN", "FAIL")}
     print(f"\n{counts['PASS']} passed, {counts['WARN']} warnings, {counts['FAIL']} failed")
