@@ -69,8 +69,9 @@ INTAKE_QUESTIONS = [
 RELEASE_QUESTION = {
     "type": "predicate",
     "name": "release_confirmed",
-    "instructions": "Does the rights note confirm a signed model release that covers every "
-                    "identifiable person and the intended usage given in the asset metadata?",
+    "instructions": "Does the rights note say that a model release has been signed, and does "
+                    "the usage that release covers include the intended usage in the asset "
+                    "metadata? Judge only from the text.",
 }
 
 # Starting thresholds. Tune them on labelled assets from your own library.

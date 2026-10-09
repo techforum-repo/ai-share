@@ -122,12 +122,18 @@ def live(key, image, runs, alt):
               "image": str(image), "image_bytes": image.stat().st_size, "cases": []}
     for label, req, expect in cases:
         print(f"\n{label}")
-        latencies, answers, raw = [], None, None
+        latencies, seen, answers, raw = [], [], None, None
         for _ in range(runs):
             answers, raw, ms = call(req, key)
             latencies.append(round(ms))
+            seen.append(answers)
         print(f"  latency ms: {latencies}")
         validate_answers(req, answers)
+        if runs > 1:
+            drift = sorted(n for n in answers for other in seen
+                           if json.dumps(other.get(n), sort_keys=True) != json.dumps(answers[n], sort_keys=True))
+            check(not drift, f"same answers across {runs} runs",
+                  "varied: " + ", ".join(dict.fromkeys(drift)) if drift else "", hard=False)
         for name, (op, want) in expect.items():
             a = answers.get(name, {})
             got = a.get("probability", a.get("choice"))
@@ -135,6 +141,7 @@ def live(key, image, runs, alt):
                   "==": lambda: got == want}[op]()
             check(ok, f"expect {name} {op} {want}", f"got {got}", hard=False)
         record["cases"].append({"case": label, "latency_ms": latencies, "answers": answers,
+                                "answers_per_run": seen,
                                 "usage": raw.get("usage"), "raw": raw})
 
     print("\nEnd-to-end: triage() on the sample, as asset_triage.py runs it")
