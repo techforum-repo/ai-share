@@ -117,7 +117,10 @@ def ask(client, request):
 def triage(ask_fn, image_path, metadata, rights_note):
     """Request 1, request 2 only when people are found, then the policy."""
     answers = ask_fn(intake_request(image_path, metadata))
-    if answers.get("identifiable_people", {}).get("probability", 0) >= PEOPLE_MIN:
+    people = answers.get("identifiable_people", {})
+    # Only a real predicate answer can trigger request 2. A refusal or a missing
+    # answer skips it here, and route() sends the asset to review instead.
+    if people.get("type") == "predicate" and people["probability"] >= PEOPLE_MIN:
         answers.update(ask_fn(release_request(metadata, rights_note)))
     return route(answers), answers
 
@@ -127,6 +130,13 @@ def route(answers):
     refused = [n for n, a in answers.items() if a["type"] == "refusal"]
     if refused:
         return "review", [f"model refused: {', '.join(refused)}"]
+    missing = [q["name"] for q in INTAKE_QUESTIONS if q["name"] not in answers]
+    if missing:
+        return "review", [f"no answer for: {', '.join(missing)}"]
+    unexpected = [q["name"] for q in INTAKE_QUESTIONS + [RELEASE_QUESTION]
+                  if q["name"] in answers and answers[q["name"]]["type"] != q["type"]]
+    if unexpected:
+        return "review", [f"unexpected answer type for: {', '.join(unexpected)}"]
 
     readiness = answers["publish_readiness"]["score"]
     if readiness < REJECT_BELOW:
