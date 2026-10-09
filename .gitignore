@@ -1,0 +1,8 @@
+# Local configuration: copy .env.example to .env in each folder and fill it in.
+.env
+.env.*
+!.env.example
+
+__pycache__/
+*.pyc
+.venv/
