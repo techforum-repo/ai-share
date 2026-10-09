@@ -1,20 +1,19 @@
-"""Test the asset-intake sample, offline or against the live Decisions API.
+"""Test the asset-intake sample against the live Decisions API.
 
-Offline (no key needed): checks the request shape and the routing policy.
+Sends four cases to POST /v1/decisions, validates every answer against the
+documented response shape, checks what the model decided, runs the sample end to
+end through triage(), and saves everything to results/ (git-ignored).
+
+  export OPENAI_API_KEY=sk-...
   python test_sample.py
-
-Live: sends the sample and control cases to POST /v1/decisions, validates every
-answer against the documented shape, checks expectations, and saves the results
-to results/ (git-ignored).
-  OPENAI_API_KEY=sk-... python test_sample.py --live
-  OPENAI_API_KEY=sk-... python test_sample.py --live --image ~/photos/hiker.jpg
+  python test_sample.py --image ~/photos/hiker.jpg --runs 3
 
 Uses only the standard library, so it does not need an SDK with Decisions support.
-Exit code is 1 if any hard check fails. Expectation misses are reported as WARN,
-because the model's judgement on your image is what you are measuring.
+Exit code is 1 if a response breaks the documented shape. When the model simply
+judges differently from what we expected, the check is a WARN, because that
+judgement is what you are measuring.
 """
 import argparse
-import copy
 import json
 import math
 import os
@@ -45,33 +44,10 @@ def check(ok, label, detail="", hard=True):
     return ok
 
 
-# ---------- shape validation (shared by offline and live) ----------
-
-def validate_request(req):
-    names = [q["name"] for q in req["questions"]]
-    check(len(names) == len(set(names)), "question names are unique", ", ".join(names))
-    check(req["model"] == "gpt-6-luna", "model is gpt-6-luna")
-    for q in req["questions"]:
-        check(q["type"] in ("predicate", "choice", "score"), f"{q['name']}: known type", q["type"])
-        check(bool(q.get("instructions")), f"{q['name']}: has instructions")
-        if q["type"] == "choice":
-            vals = [c["value"] for c in q["choices"]]
-            check(len(vals) == len(set(vals)) and len(vals) >= 2, f"{q['name']}: distinct choices", ", ".join(vals))
-        if q["type"] == "score":
-            check(len(q["levels"]) >= 2, f"{q['name']}: at least two levels", str(len(q["levels"])))
-    if isinstance(req["input"], list):
-        parts = req["input"][0]["content"]
-        img = [p for p in parts if p["type"] == "input_image"]
-        for p in img:
-            check(p["image_url"].startswith("data:image/") and ";base64," in p["image_url"],
-                  "image is an inline base64 data URL", f"{len(p['image_url']):,} chars")
-
-
 def validate_answers(req, answers):
     """Check answers against the documented response shape."""
     by_q = {q["name"]: q for q in req["questions"]}
-    check(set(answers) == set(by_q), "one answer per question name",
-          f"got {sorted(answers)}")
+    check(set(answers) == set(by_q), "one answer per question name", f"got {sorted(answers)}")
     for name, a in answers.items():
         q = by_q.get(name)
         if q is None:
@@ -100,66 +76,6 @@ def validate_answers(req, answers):
                 check(math.isclose(weighted, s, abs_tol=0.05), f"{name}: score = weighted average",
                       f"{s} vs {weighted:.3f}", hard=False)
 
-
-# ---------- offline ----------
-
-def offline():
-    print("\nRequest shape (fixtures)")
-    meta = (FIX / "metadata.txt").read_text()
-    req1 = t.intake_request(FIX / "sample-asset.png", meta)
-    validate_request(req1)
-    validate_request(t.release_request((FIX / "rights.txt").read_text()))
-
-    print("\nIllustrative answers match the documented shape")
-    sample = json.loads((FIX / "sample-answers.json").read_text())
-    intake_only = {k: v for k, v in sample.items() if k != "release_confirmed"}
-    validate_answers(req1, intake_only)
-
-    print("\nRouting policy")
-    cases = [
-        ("sample as captured", lambda a: None, ("review", ["alt text does not match the image"])),
-        ("alt text fixed", lambda a: a["alt_text_matches"].update(probability=0.93), ("auto_approve", [])),
-        ("people, no release check", lambda a: (a["alt_text_matches"].update(probability=0.93),
-                                                a.pop("release_confirmed")),
-         ("review", ["people visible, release not checked"])),
-        ("release not confirmed", lambda a: (a["alt_text_matches"].update(probability=0.93),
-                                             a["release_confirmed"].update(probability=0.2)),
-         ("review", ["people visible, release not confirmed"])),
-        ("watermark", lambda a: (a["alt_text_matches"].update(probability=0.93),
-                                 a["third_party_mark"].update(probability=0.6)),
-         ("review", ["possible third-party logo or watermark"])),
-        ("needs edits", lambda a: (a["alt_text_matches"].update(probability=0.93),
-                                   a["publish_readiness"].update(score=1.1)),
-         ("review", ["needs edits (quality 1.10 of 2)"])),
-        ("unusable image", lambda a: a["publish_readiness"].update(score=0.4),
-         ("return_to_uploader", ["image quality score 0.40 of 2"])),
-        ("refusal", lambda a: a.update(third_party_mark={"type": "refusal", "name": "third_party_mark"}),
-         ("review", ["model refused: third_party_mark"])),
-    ]
-    for label, mutate, expected in cases:
-        a = copy.deepcopy(sample)
-        mutate(a)
-        got = t.route(a)
-        check(got == expected, label, f"{got[0]} {got[1]}")
-
-    print("\ntriage(): request 2 runs only when people are found")
-    for people, want_calls in ((0.94, 2), (0.10, 1)):
-        calls = []
-
-        def fake_ask(req, people=people):
-            calls.append([q["name"] for q in req["questions"]])
-            answers = {q["name"]: copy.deepcopy(sample[q["name"]]) for q in req["questions"]}
-            if "identifiable_people" in answers:
-                answers["identifiable_people"]["probability"] = people
-            return answers
-
-        (route, reasons), _ = t.triage(fake_ask, FIX / "sample-asset.png", meta,
-                                       (FIX / "rights.txt").read_text())
-        check(len(calls) == want_calls, f"people {people}: {want_calls} request(s)",
-              f"{route} {reasons}")
-
-
-# ---------- live ----------
 
 def call(req, key):
     body = json.dumps(req).encode()
@@ -195,7 +111,7 @@ def live(key, image, runs):
     for label, req, expect in cases:
         print(f"\n{label}")
         latencies, answers, raw = [], None, None
-        for i in range(runs):
+        for _ in range(runs):
             answers, raw, ms = call(req, key)
             latencies.append(round(ms))
         print(f"  latency ms: {latencies}")
@@ -209,7 +125,6 @@ def live(key, image, runs):
         record["cases"].append({"case": label, "latency_ms": latencies, "answers": answers,
                                 "usage": raw.get("usage"), "raw": raw})
 
-    # End-to-end: the sample's real route, with the release check only if needed.
     print("\nEnd-to-end: triage() on the sample, as asset_triage.py runs it")
     (route, reasons), sample_answers = t.triage(
         lambda req: call(req, key)[0], image, (FIX / "metadata.txt").read_text(),
@@ -227,28 +142,31 @@ def live(key, image, runs):
     out.write_text(json.dumps(record, indent=2))
     answers_out = RESULTS / "live-answers.json"
     answers_out.write_text(json.dumps(sample_answers, indent=2))
-    print(f"\nSaved {out.relative_to(HERE)} and {answers_out.relative_to(HERE)}")
-    print(f"Replay the policy on them: python asset_triage.py --replay {answers_out.relative_to(HERE)}")
+    return out, answers_out
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--live", action="store_true", help="also call the Decisions API (needs OPENAI_API_KEY)")
     p.add_argument("--image", type=Path, default=FIX / "sample-asset.png", help="image to test with")
-    p.add_argument("--runs", type=int, default=1, help="calls per live case, for latency and stability")
+    p.add_argument("--runs", type=int, default=1, help="calls per case, for latency and stability")
     args = p.parse_args()
 
-    offline()
-    if args.live:
-        key = os.environ.get("OPENAI_API_KEY")
-        if not key:
-            sys.exit("OPENAI_API_KEY is not set")
-        if args.image.suffix.lower() not in t.MIME:
-            sys.exit(f"unsupported image type {args.image.suffix}; use one of {', '.join(t.MIME)}")
-        live(key, args.image.expanduser(), args.runs)
+    key = os.environ.get("OPENAI_API_KEY")
+    if not key:
+        sys.exit("OPENAI_API_KEY is not set")
+    image = args.image.expanduser()
+    if image.suffix.lower() not in t.MIME:
+        sys.exit(f"unsupported image type {image.suffix}; use one of {', '.join(t.MIME)}")
+
+    out, answers_out = live(key, image, args.runs)
 
     counts = {s: sum(r["status"] == s for r in results) for s in ("PASS", "WARN", "FAIL")}
     print(f"\n{counts['PASS']} passed, {counts['WARN']} warnings, {counts['FAIL']} failed")
+    print(f"Saved {out.relative_to(HERE)} and {answers_out.relative_to(HERE)}")
+    print("\nNext steps:")
+    print("  - Read the WARN lines: they are where the model judged differently from what we expected.")
+    print("  - Try your own assets: --image <photo>, and edit fixtures/metadata.txt and rights.txt.")
+    print("  - Tune the thresholds at the top of asset_triage.py once you have labelled examples.")
     return 1 if counts["FAIL"] else 0
 
 

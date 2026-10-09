@@ -5,9 +5,7 @@ questions. Request 2 is text only and runs only when request 1 finds
 identifiable people. A plain-Python policy turns the answers into a route.
 
 Usage:
-  python asset_triage.py photo.jpg metadata.txt rights.txt      # calls the API
-  python asset_triage.py photo.jpg metadata.txt rights.txt --dry-run
-  python asset_triage.py --replay fixtures/sample-answers.json   # policy only
+  python asset_triage.py photo.jpg metadata.txt rights.txt
 
 Needs OPENAI_API_KEY and an OpenAI Python SDK with Decisions support (3.26.0+).
 """
@@ -149,33 +147,15 @@ def route(answers):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("image", nargs="?", type=Path)
-    p.add_argument("metadata", nargs="?", type=Path)
-    p.add_argument("rights", nargs="?", type=Path)
-    p.add_argument("--dry-run", action="store_true", help="print request 1 without calling the API")
-    p.add_argument("--replay", type=Path, help="run the policy on saved answers")
+    p.add_argument("image", type=Path)
+    p.add_argument("metadata", type=Path)
+    p.add_argument("rights", type=Path)
     args = p.parse_args()
 
-    if args.replay:
-        answers = json.loads(args.replay.read_text())
-    else:
-        if not (args.image and args.metadata and args.rights):
-            p.error("image, metadata and rights are required unless --replay is used")
-        request = intake_request(args.image, args.metadata.read_text())
-        if args.dry_run:
-            shown = json.loads(json.dumps(request))
-            url = shown["input"][0]["content"][1]["image_url"]
-            shown["input"][0]["content"][1]["image_url"] = url[:40] + f"...({len(url)} chars)"
-            print(json.dumps(shown, indent=2))
-            return
-        from openai import OpenAI
-        client = OpenAI()
-        (decision, reasons), answers = triage(lambda r: ask(client, r), args.image,
-                                              args.metadata.read_text(), args.rights.read_text())
-        print(json.dumps({"route": decision, "reasons": reasons, "answers": answers}, indent=2))
-        return
-
-    decision, reasons = route(answers)
+    from openai import OpenAI
+    client = OpenAI()
+    (decision, reasons), answers = triage(lambda r: ask(client, r), args.image,
+                                          args.metadata.read_text(), args.rights.read_text())
     print(json.dumps({"route": decision, "reasons": reasons, "answers": answers}, indent=2))
 
 

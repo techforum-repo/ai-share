@@ -1,8 +1,8 @@
 # Asset intake triage with the OpenAI Decisions API
 
-A small, runnable example of the [OpenAI Decisions API](https://developers.openai.com/api/docs/guides/decisions) (public beta, `gpt-6-luna`) using image and text input together.
+A small, runnable example of the [OpenAI Decisions API](https://developers.openai.com/api/docs/guides/decisions) (public beta, `gpt-6-luna`) that uses image and text input together.
 
-When an image arrives in a DAM with its title, alt text, and intended usage, the script decides whether the asset can **auto-approve**, needs **review** (and why), or should go **back to the uploader**:
+When an image arrives in a DAM with its title, alt text, and intended usage, the example decides whether the asset can **auto-approve**, needs **review** (and why), or should go **back to the uploader**:
 
 1. **Request 1 (image + text):** five independent questions about the asset.
 
@@ -20,15 +20,14 @@ When an image arrives in a DAM with its title, alt text, and intended usage, the
 ## Contents
 
 ```
-asset_triage.py          the example: request builders, API calls (OpenAI SDK), routing policy
-test_sample.py           tests: offline checks, plus live checks against /v1/decisions
+asset_triage.py          the example: questions, requests, triage(), route(); calls the API via the OpenAI SDK
+test_sample.py           live test: sends the sample and control cases to /v1/decisions and checks the answers
 fixtures/
   sample-asset.png       the sample image (an illustration of a hiker in a blue jacket)
   metadata.txt           its metadata, with alt text deliberately copied from a studio shot
   rights.txt             a rights note with a signed model release
-  rights-missing.txt     a rights note with no release (negative control)
-  sample-answers.json    ILLUSTRATIVE answers in the documented response shape, for offline tests
-results/                 written by live runs (git-ignored)
+  rights-missing.txt     a rights note with no release
+results/                 written by test runs (git-ignored)
 ```
 
 The brand (Larkfield Outdoor), the asset, and the release number are fictional.
@@ -36,50 +35,44 @@ The brand (Larkfield Outdoor), the asset, and the release number are fictional.
 ## Requirements
 
 - Python 3.9+
-- `test_sample.py` uses only the standard library, even in live mode.
-- `asset_triage.py` calls the API through the OpenAI Python SDK, which needs a version with Decisions support (3.26.0 or later): `pip install -r requirements.txt`.
-- For live calls: an `OPENAI_API_KEY` with access to the Decisions API.
+- An `OPENAI_API_KEY` with access to the Decisions API
+- `test_sample.py` needs only the standard library.
+- `asset_triage.py` needs an OpenAI Python SDK with Decisions support (3.26.0 or later): `pip install -r requirements.txt`, ideally in a virtual environment.
 
-## Test it
-
-**Offline (no key):** checks the request shape, checks that the illustrative answers match the documented response shape, runs eight routing-policy cases, and checks that `triage()` makes the second request only when people are found.
-
-```bash
-python test_sample.py
-# ... 43 passed, 0 warnings, 0 failed
-```
-
-**Live:** sends four cases to `POST /v1/decisions` and validates every answer. The cases are the sample, a control with correct alt text, the signed release, and the missing release. It then runs the sample end to end through the policy.
+## Test it against the API
 
 ```bash
 export OPENAI_API_KEY=sk-...
-python test_sample.py --live                              # uses fixtures/sample-asset.png
-python test_sample.py --live --image ~/photos/hiker.jpg --runs 3
+python test_sample.py                                   # uses fixtures/sample-asset.png
+python test_sample.py --image ~/photos/hiker.jpg --runs 3
 ```
+
+It sends four cases (the sample with the wrong alt text, a control with the correct alt text, the signed release, and the missing release), validates every answer, and then runs the sample end to end through `triage()`.
 
 - **FAIL:** the response breaks the documented shape. For example, an answer is missing, a probability is outside 0–1, a choice isn't one of yours, or a score is out of range. The exit code is 1.
-- **WARN:** the model's judgement differs from the expectation. For example, a mismatched alt text should score below 0.5, and a missing release should score below 0.8. Expect some warnings; that is what you are measuring.
-- **Output:** `results/live-run-<timestamp>.json` holds the raw responses, latency per call, and usage if returned. `results/live-answers.json` holds the sample's answers, which you can replay through the policy.
+- **WARN:** the model's judgement differs from the expectation. For example, a mismatched alt text should score below 0.5, and a missing release should score below 0.8. Expect some warnings; they are what you are measuring.
+- **Output:** `results/live-run-<timestamp>.json` holds the raw responses, latency per call, and usage if returned. `results/live-answers.json` holds the sample's final answers.
 
-Tip: the sample image is an illustration, so the model may not treat its face as identifiable, and then the release check won't run. Use `--image` with a real web rendition (JPEG, PNG, or WebP, about 1000 px on the long side) for meaningful numbers.
+Use `--image` with a real web rendition (JPEG, PNG, or WebP, about 1000 px on the long side). The sample image is an illustration, so the model may not treat its face as identifiable, and then the release check won't run.
 
-## Run the example
+If the API returns an error, the script prints it. A 403 or 404 usually means the key or organisation doesn't have Decisions access yet.
+
+## Run the example on your own assets
 
 ```bash
-# Print request 1 without calling the API (image data truncated)
-python asset_triage.py fixtures/sample-asset.png fixtures/metadata.txt fixtures/rights.txt --dry-run
-
-# Call the API through the SDK and print the route, reasons, and answers
-python asset_triage.py fixtures/sample-asset.png fixtures/metadata.txt fixtures/rights.txt
-
-# Run only the routing policy on saved answers
-python asset_triage.py --replay fixtures/sample-answers.json
-python asset_triage.py --replay results/live-answers.json
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+python asset_triage.py photo.jpg metadata.txt rights.txt
 ```
 
-## Tuning
+It prints the route, the reasons, and every answer. Write `metadata.txt` and `rights.txt` in the same format as the files in `fixtures/`.
 
-The thresholds at the top of `asset_triage.py` (`ALT_TEXT_MIN`, `THIRD_PARTY_MAX`, `RELEASE_MIN`, `READY_MIN`, `REJECT_BELOW`, `PEOPLE_MIN`) are starting points. Set them from labelled examples in your own library, based on the cost of each kind of error. A missed model release costs far more than one extra review.
+## Next steps
+
+1. Run the test on a few real photos and read the warnings first.
+2. Collect a few dozen assets where you already know the right outcome, and run them through `asset_triage.py`.
+3. Tune the thresholds at the top of `asset_triage.py` (`ALT_TEXT_MIN`, `THIRD_PARTY_MAX`, `RELEASE_MIN`, `READY_MIN`, `REJECT_BELOW`, `PEOPLE_MIN`) based on what each kind of mistake costs you. A missed model release costs far more than one extra review.
+4. Run it in shadow mode next to your current review process before letting it act.
 
 ## Notes
 
